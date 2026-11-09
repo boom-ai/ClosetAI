@@ -129,22 +129,30 @@ class AiClient(private val prefs: SharedPreferences) {
         return sb.toString().ifBlank { throw AiException("Claude returned an empty answer.") }
     }
 
+    /** Sends the request, retrying up to 4 times when the AI is overloaded (429/500/502/503/504/529). */
     private fun execute(req: Request): JSONObject {
-        return http.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull()
-                throw AiException(
-                    when (resp.code) {
-                        400 -> "AI request rejected: ${msg ?: "check the model name in Settings"}"
-                        401, 403 -> "Your API key was rejected — check it in Settings."
-                        404 -> "Model not found — check the model name in Settings."
-                        429 -> "AI rate limit hit — wait a minute and try again."
-                        else -> "AI error ${resp.code}: ${msg ?: "try again"}"
-                    },
-                )
+        val waits = longArrayOf(3_000, 8_000, 15_000, 25_000)
+        var attempt = 0
+        while (true) {
+            val (code, text) = http.newCall(req).execute().use { resp -> resp.code to resp.body?.string().orEmpty() }
+            if (code in 200..299) return JSONObject(text)
+            val retryable = code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529
+            if (retryable && attempt < waits.size) {
+                Thread.sleep(waits[attempt])
+                attempt++
+                continue
             }
-            JSONObject(text)
+            val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull()
+            throw AiException(
+                when (code) {
+                    400 -> "AI request rejected: ${msg ?: "check the model name in Settings"}"
+                    401, 403 -> "Your API key was rejected — check it in Settings."
+                    404 -> "Model not found — check the model name in Settings."
+                    429 -> "AI rate limit hit — wait a minute and try again."
+                    500, 502, 503, 504, 529 -> "The AI servers are busy right now. Wait a minute and try again, or switch model/provider in Settings."
+                    else -> "AI error $code: ${msg ?: "try again"}"
+                },
+            )
         }
     }
 
