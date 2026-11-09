@@ -150,6 +150,24 @@ Reply with ONLY JSON: {"outfits":[{"title":"3-5 word name","itemIds":["id",...],
         }
     }
 
+    /** Virtual try-on: image 1 = the person, following images = the outfit's items. */
+    suspend fun tryOn(person: ByteArray, profile: Profile, items: List<Pair<Item, ByteArray>>): ByteArray {
+        val list = items.mapIndexed { i, pair ->
+            val piece = pair.first
+            "Image ${i + 2}: ${piece.category} — ${piece.name}${if (piece.color.isNotBlank()) " (${piece.color})" else ""}"
+        }.joinToString("\n")
+        val prompt = """
+Virtual try-on. Image 1 is a photo of a real person. The other images are clothing items from their own wardrobe:
+$list
+Generate ONE photorealistic, full-length (head to toe) photo of the SAME person from image 1 wearing exactly these items together as one outfit.
+- Keep the person's identity unchanged: same face, facial hair, hairstyle, skin tone, body build and proportions (height ${profile.height.ifBlank { "as in the photo" }}).
+- Reproduce each garment faithfully: same colour, pattern, fabric texture, logos and fit. Tops tucked or untucked as looks natural for the outfit.
+- Natural relaxed standing pose facing the camera, camera at chest height, soft natural daylight, plain light-grey studio background, portrait 3:4 framing.
+- No extra accessories or clothes that are not listed.
+""".trimIndent()
+        return ai.generateImage(prompt, listOf(person) + items.map { it.second })
+    }
+
     suspend fun gaps(items: List<Item>, profile: Profile): Gaps {
         val prompt = """
 You are a stylist auditing a client's wardrobe.

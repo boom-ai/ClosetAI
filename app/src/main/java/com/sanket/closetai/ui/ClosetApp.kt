@@ -95,6 +95,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.sanket.closetai.ai.AiSettings
+import com.sanket.closetai.ai.DEFAULT_IMAGE_MODEL
 import com.sanket.closetai.ai.Provider
 import com.sanket.closetai.data.CATEGORIES
 import com.sanket.closetai.data.FORMALITY_LABELS
@@ -547,7 +548,20 @@ private fun LookCard(vm: AppViewModel, look: Look) {
     val its = look.itemIds.mapNotNull { id -> vm.items.firstOrNull { it.id == id } }
     if (its.isEmpty()) return
     val saved = vm.isSaved(look)
+    val tryPath = vm.tryOns[look.key]
+    val trying = look.key in vm.tryOnBusy
     Column(Modifier.fillMaxWidth().clip(R18).background(Panel).border(1.dp, Line, R18)) {
+        if (tryPath != null || trying) {
+            Box(Modifier.fillMaxWidth().aspectRatio(0.75f).background(Paper), contentAlignment = Alignment.Center) {
+                if (tryPath != null) AsyncImage(model = File(tryPath), contentDescription = "You wearing ${look.title}",
+                    contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                if (trying) Column(horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.clip(R14).background(Color(0xCC14110F)).padding(16.dp)) {
+                    CircularProgressIndicator(Modifier.size(28.dp), color = Gold, strokeWidth = 3.dp)
+                    Text("Dressing you up… (20–60 s)", color = Ink, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
+                }
+            }
+        }
         LazyRow(
             Modifier.fillMaxWidth().background(Paper),
             contentPadding = PaddingValues(10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -567,7 +581,15 @@ private fun LookCard(vm: AppViewModel, look: Look) {
             Text(look.why, color = Color(0xFFE2D8CC), lineHeight = 20.sp, modifier = Modifier.padding(top = 6.dp))
             look.tips.forEach { Text("•  $it", color = Color(0xFFE2D8CC), fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.padding(top = 4.dp)) }
             if (look.addOn.isNotBlank()) Text("🛍️ Would level up with: ${look.addOn}", color = Mute, fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
-            Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { vm.tryOn(look) }, enabled = !trying, shape = R14,
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = CardC, contentColor = Gold),
+                border = BorderStroke(1.dp, Gold),
+            ) {
+                Text(if (tryPath == null) "✨ See it on me" else "↻ Regenerate try-on", fontWeight = FontWeight.SemiBold)
+            }
+            Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { vm.wear(look) }, shape = R14,
                     colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Bg)) {
                     Text("👕 Wearing this", fontWeight = FontWeight.SemiBold)
@@ -687,6 +709,8 @@ private fun SettingsDialog(vm: AppViewModel) {
     var provider by remember { mutableStateOf(cur.provider) }
     var key by remember { mutableStateOf(cur.apiKey) }
     var model by remember { mutableStateOf(cur.model) }
+    var imageModel by remember { mutableStateOf(cur.imageModel) }
+    var geminiKey by remember { mutableStateOf(cur.geminiKey) }
     val uri = LocalUriHandler.current
 
     AlertDialog(
@@ -714,10 +738,21 @@ private fun SettingsDialog(vm: AppViewModel) {
                 OutlinedTextField(model, { model = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 Text("Leave the default unless you want a different model.", color = Mute, fontSize = 12.sp,
                     modifier = Modifier.padding(top = 4.dp))
+                FieldLabel("Try-on image model (Gemini)")
+                OutlinedTextField(imageModel, { imageModel = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                if (provider != Provider.GEMINI) {
+                    FieldLabel("Gemini key for try-on")
+                    OutlinedTextField(geminiKey, { geminiKey = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+                }
+                Text("“See it on me” uses Gemini's image model with your Gemini key. Image generation may not be on the free tier.",
+                    color = Mute, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
             }
         },
         confirmButton = {
-            TextButton({ vm.saveSettings(AiSettings(provider, key, model.ifBlank { provider.defaultModel })) }) { Text("Save") }
+            TextButton({ vm.saveSettings(AiSettings(provider, key, model.ifBlank { provider.defaultModel },
+                imageModel.ifBlank { DEFAULT_IMAGE_MODEL }, geminiKey)) }) { Text("Save") }
         },
         dismissButton = { TextButton({ vm.showSettings = false }) { Text("Cancel") } },
     )

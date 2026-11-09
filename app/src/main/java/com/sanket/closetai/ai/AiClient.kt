@@ -19,7 +19,18 @@ enum class Provider(val label: String, val defaultModel: String, val keyUrl: Str
     CLAUDE("Anthropic Claude", "claude-haiku-5-5", "https://console.anthropic.com/settings/keys"),
 }
 
-data class AiSettings(val provider: Provider, val apiKey: String, val model: String)
+data class AiSettings(
+    val provider: Provider,
+    val apiKey: String,
+    val model: String,
+    val imageModel: String = DEFAULT_IMAGE_MODEL,
+    val geminiKey: String = "",
+) {
+    /** Key used for try-on images (always Gemini). */
+    val tryOnKey: String get() = if (provider == Provider.GEMINI) apiKey else geminiKey
+}
+
+const val DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image"
 
 class AiException(message: String) : IOException(message)
 
@@ -41,6 +52,8 @@ class AiClient(private val prefs: SharedPreferences) {
             provider = p,
             apiKey = prefs.getString("apiKey", "") ?: "",
             model = (prefs.getString("model", "") ?: "").ifBlank { p.defaultModel },
+            imageModel = (prefs.getString("imageModel", "") ?: "").ifBlank { DEFAULT_IMAGE_MODEL },
+            geminiKey = prefs.getString("geminiKey", "") ?: "",
         )
     }
 
@@ -49,6 +62,8 @@ class AiClient(private val prefs: SharedPreferences) {
             .putString("provider", s.provider.name)
             .putString("apiKey", s.apiKey.trim())
             .putString("model", s.model.trim())
+            .putString("imageModel", s.imageModel.trim())
+            .putString("geminiKey", s.geminiKey.trim())
             .apply()
     }
 
@@ -67,6 +82,41 @@ class AiClient(private val prefs: SharedPreferences) {
     suspend fun askJson(prompt: String, images: List<ByteArray> = emptyList()): Any {
         val text = ask(prompt, images)
         return extractJson(text) ?: throw AiException("The AI reply wasn't readable — please try again.")
+    }
+
+    /** Generates an image with Gemini's image model. Returns JPEG/PNG bytes. */
+    suspend fun generateImage(prompt: String, images: List<ByteArray>): ByteArray = withContext(Dispatchers.IO) {
+        val s = settings()
+        if (s.tryOnKey.isBlank()) throw AiException("Try-on needs a Gemini key — add it in Settings.")
+        val parts = JSONArray().put(JSONObject().put("text", prompt))
+        images.forEach {
+            parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", b64(it))))
+        }
+        val body = JSONObject()
+            .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
+            .put("generationConfig", JSONObject().put("responseModalities", JSONArray().put("TEXT").put("IMAGE")))
+        val req = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models/${s.imageModel}:generateContent")
+            .header("x-goog-api-key", s.tryOnKey)
+            .post(body.toString().toRequestBody(jsonType))
+            .build()
+        val o = execute(req)
+        val cand = o.optJSONArray("candidates")?.optJSONObject(0)
+            ?: throw AiException("Gemini didn't return an image — try again.")
+        val outParts = cand.optJSONObject("content")?.optJSONArray("parts") ?: JSONArray()
+        var note = ""
+        for (i in 0 until outParts.length()) {
+            val p = outParts.optJSONObject(i) ?: continue
+            val inline = p.optJSONObject("inlineData") ?: p.optJSONObject("inline_data")
+            val data = inline?.optString("data").orEmpty()
+            if (data.isNotBlank()) return@withContext Base64.decode(data, Base64.DEFAULT)
+            if (p.has("text")) note = p.optString("text")
+        }
+        val reason = cand.optString("finishReason")
+        throw AiException(
+            if (reason.isNotBlank() && reason != "STOP") "Gemini declined to make this image ($reason). Try a different outfit or photo."
+            else note.ifBlank { "Gemini didn't return an image — try again." }.take(200),
+        )
     }
 
     private fun b64(bytes: ByteArray) = Base64.encodeToString(bytes, Base64.NO_WRAP)

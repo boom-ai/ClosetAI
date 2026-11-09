@@ -23,6 +23,7 @@ class Repo(private val ctx: Context) {
         val profile: Profile,
         val saved: List<Look>,
         val history: List<WearLog>,
+        val tryOns: Map<String, String> = emptyMap(),
     )
 
     fun load(): Snapshot {
@@ -38,6 +39,9 @@ class Repo(private val ctx: Context) {
                 profile = Profile.from(o.optJSONObject("profile")),
                 saved = list("saved") { Look.from(it) },
                 history = list("history") { WearLog.from(it) },
+                tryOns = o.optJSONObject("tryOns")?.let { t ->
+                    t.keys().asSequence().associateWith { k -> t.optString(k) }.filterValues { File(it).exists() }
+                } ?: emptyMap(),
             )
         } catch (e: Exception) {
             Snapshot(emptyList(), Profile(), emptyList(), emptyList())
@@ -51,6 +55,7 @@ class Repo(private val ctx: Context) {
             .put("profile", s.profile.toJson())
             .put("saved", JSONArray().apply { s.saved.forEach { put(it.toJson()) } })
             .put("history", JSONArray().apply { s.history.forEach { put(it.toJson()) } })
+            .put("tryOns", JSONObject().apply { s.tryOns.forEach { (k, v) -> put(k, v) } })
         val tmp = File(ctx.filesDir, "closet.json.tmp")
         tmp.writeText(o.toString())
         if (!tmp.renameTo(dataFile)) {
@@ -88,6 +93,14 @@ class Repo(private val ctx: Context) {
         decoded.recycle()
         out.recycle()
         return file
+    }
+
+    /** Saves generated try-on image bytes as a file. */
+    fun saveTryOn(bytes: ByteArray): File {
+        val dir = File(ctx.filesDir, "tryon").apply { mkdirs() }
+        val f = File(dir, "tryon_${System.currentTimeMillis()}.jpg")
+        f.writeBytes(bytes)
+        return f
     }
 
     fun deleteFile(path: String) {

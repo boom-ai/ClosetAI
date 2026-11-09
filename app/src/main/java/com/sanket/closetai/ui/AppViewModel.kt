@@ -6,6 +6,7 @@ import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
@@ -52,6 +53,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val saved = mutableStateListOf<Look>()
     val history = mutableStateListOf<WearLog>()
     val looks = mutableStateListOf<Look>()
+    /** look.key -> generated try-on image path */
+    val tryOns = mutableStateMapOf<String, String>()
+    /** look keys currently generating */
+    val tryOnBusy = mutableStateListOf<String>()
 
     var tab by mutableStateOf(Tab.WARDROBE)
     var filter by mutableStateOf("All")
@@ -81,12 +86,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             profile = s.profile
             saved.addAll(s.saved)
             history.addAll(s.history)
+            tryOns.putAll(s.tryOns)
             if (!ai.isConfigured) message = "Tip: add your free AI key in Settings to turn on auto-detection."
         }
     }
 
     private fun persist() {
-        val snap = Repo.Snapshot(items.toList(), profile, saved.toList(), history.toList())
+        val snap = Repo.Snapshot(items.toList(), profile, saved.toList(), history.toList(), tryOns.toMap())
         viewModelScope.launch(Dispatchers.IO) {
             saveLock.withLock { runCatching { repo.save(snap) } }
         }
@@ -252,6 +258,36 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
         persist()
         message = "Logged — enjoy the fit ✨"
+    }
+
+    /** Generate an image of the user wearing this look. */
+    fun tryOn(look: Look) {
+        val key = look.key
+        if (key in tryOnBusy) return
+        val photo = profile.photoPath
+        if (photo.isBlank() || !File(photo).exists()) {
+            message = "Add your full-length photo in Profile first"; tab = Tab.PROFILE; return
+        }
+        if (ai.settings().tryOnKey.isBlank()) { showSettings = true; message = "Try-on needs a Gemini key"; return }
+        val pieces = look.itemIds.mapNotNull { id -> items.firstOrNull { it.id == id } }
+        if (pieces.isEmpty()) return
+        tryOnBusy.add(key)
+        viewModelScope.launch {
+            try {
+                val (person, withBytes) = withContext(Dispatchers.IO) {
+                    File(photo).readBytes() to pieces.map { it to File(it.imagePath).readBytes() }
+                }
+                val img = stylist.tryOn(person, profile, withBytes)
+                val f = withContext(Dispatchers.IO) { repo.saveTryOn(img) }
+                tryOns[key]?.let { repo.deleteFile(it) }
+                tryOns[key] = f.absolutePath
+                persist()
+            } catch (e: Exception) {
+                message = e.message ?: "Try-on failed"
+            } finally {
+                tryOnBusy.remove(key)
+            }
+        }
     }
 
     fun findGaps() {
