@@ -40,6 +40,16 @@ val VIBES = listOf("Surprise me", "Clean & minimal", "Sharp", "Relaxed", "Bold",
 val STYLES = listOf("Smart casual", "Minimal / clean", "Streetwear", "Classic / formal", "Ethnic / Indo-western", "Sporty", "Mixed")
 val DRESSING_FOR = listOf("Menswear", "Womenswear", "Unisex")
 
+/** Sensible default weather for north India (Punjab) by month; the user can still change it. */
+fun weatherForMonth(month: Int = java.util.Calendar.getInstance().get(java.util.Calendar.MONTH)): String = when (month) {
+    11, 0 -> "Cold"                // Dec, Jan
+    1, 10 -> "Pleasant"            // Feb, Nov — cool mornings
+    2, 9 -> "Pleasant"             // Mar, Oct
+    3 -> "Warm"                    // Apr
+    4, 5 -> "Hot (32°C+)"          // May, Jun
+    else -> "Rainy"                // Jul, Aug, Sep
+}
+
 class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = Repo(app)
     val ai = AiClient(app.getSharedPreferences("settings", Context.MODE_PRIVATE))
@@ -63,11 +73,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** look.key -> +1 / -1 for the current session's buttons */
     val ratings = mutableStateMapOf<String, Int>()
     var styleStage by mutableStateOf("")
+    /** Last styling error, shown as an inline card with Retry. */
+    var styleError by mutableStateOf<String?>(null)
+    /** Saving is only allowed once data has loaded successfully (prevents wiping the wardrobe). */
+    private var loaded = false
+    private var saveSeq = 0L
+    private var savedSeq = 0L
+    private val lastWorn = mutableMapOf<String, Long>()
+    private val prefs = app.getSharedPreferences("state", Context.MODE_PRIVATE)
 
     var tab by mutableStateOf(Tab.WARDROBE)
     var filter by mutableStateOf("All")
     var occasion by mutableStateOf(OCCASIONS[0])
-    var weather by mutableStateOf(WEATHER[2])
+    var weather by mutableStateOf(weatherForMonth())
     var vibe by mutableStateOf(VIBES[0])
     var anchorId by mutableStateOf<String?>(null)
     var extra by mutableStateOf("")
@@ -81,13 +99,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var showSettings by mutableStateOf(false)
     var aiSettings by mutableStateOf(ai.settings())
 
-    /** Uri handed to the camera app; kept here so it survives recomposition. */
-    var captureUri: Uri? = null
-    var captureForProfile = false
+    /** Uri handed to the camera app; also kept in prefs so it survives the app being killed while the camera is open. */
+    var captureUri: Uri?
+        get() = prefs.getString("captureUri", null)?.let { Uri.parse(it) }
+        set(v) { prefs.edit().putString("captureUri", v?.toString()).apply() }
+    var captureForProfile: Boolean
+        get() = prefs.getBoolean("captureForProfile", false)
+        set(v) { prefs.edit().putBoolean("captureForProfile", v).apply() }
 
     init {
+        ai.onRetry = { msg -> styleStage = msg }
         viewModelScope.launch {
             val s = withContext(Dispatchers.IO) { repo.load() }
+            if (s == null) {
+                message = "Couldn't read your saved wardrobe. A backup copy was kept — saving is paused to protect it."
+                return@launch
+            }
             items.addAll(s.items)
             profile = s.profile
             saved.addAll(s.saved)
@@ -95,15 +122,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             tryOns.putAll(s.tryOns)
             liked.addAll(s.liked)
             disliked.addAll(s.disliked)
+            loaded = true
             if (!ai.isConfigured) message = "Tip: add your free AI key in Settings to turn on auto-detection."
         }
     }
 
     private fun persist() {
+        if (!loaded) return
         val snap = Repo.Snapshot(items.toList(), profile, saved.toList(), history.toList(), tryOns.toMap(),
             liked.toList(), disliked.toList())
+        val seq = ++saveSeq
         viewModelScope.launch(Dispatchers.IO) {
-            saveLock.withLock { runCatching { repo.save(snap) } }
+            saveLock.withLock {
+                // only write if no newer snapshot has already been written
+                if (seq > savedSeq) { runCatching { repo.save(snap) }; savedSeq = seq }
+            }
         }
     }
 
@@ -180,8 +213,26 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteItem(id: String) {
         val target = items.firstOrNull { x -> x.id == id } ?: return
         items.remove(target)
-        repo.deleteFile(target.imagePath)
         if (anchorId == id) anchorId = null
+        // drop the piece from saved looks / history; remove looks that no longer make sense
+        for (i in saved.indices.reversed()) {
+            val l = saved[i]
+            if (id in l.itemIds) {
+                val rest = l.itemIds - id
+                if (rest.size < 2) saved.removeAt(i) else saved[i] = l.copy(itemIds = rest)
+            }
+        }
+        for (i in history.indices.reversed()) {
+            val h = history[i]
+            if (id in h.itemIds) history[i] = h.copy(itemIds = h.itemIds - id)
+        }
+        val staleTryOns = tryOns.filterKeys { k -> id in k.split(",") }
+        staleTryOns.keys.forEach { tryOns.remove(it) }
+        looks.removeAll { id in it.itemIds }
+        viewModelScope.launch(Dispatchers.IO) {
+            repo.deleteFile(target.imagePath)
+            staleTryOns.values.forEach { repo.deleteFile(it) }
+        }
         persist()
     }
 
@@ -231,6 +282,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (items.size < 2) { message = "Add a few clothes first"; tab = Tab.WARDROBE; return }
         if (!ai.isConfigured) { showSettings = true; return }
         styling = true
+        styleError = null
+        styleStage = ""
         looks.clear()
         viewModelScope.launch {
             try {
@@ -241,19 +294,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     readImage = { path -> runCatching { File(path).readBytes() }.getOrNull() },
                     onStage = { st -> styleStage = st },
                 )
-                if (res.isEmpty()) message = "Couldn't build a full look — try another occasion or add more pieces."
+                if (res.isEmpty()) styleError = "Couldn't build a complete look (top + bottom + shoes) for this. Try another occasion, or add more pieces."
                 looks.addAll(res)
             } catch (e: Exception) {
-                message = e.message ?: "Styling failed"
+                styleError = e.message ?: "Styling failed"
             } finally {
                 styling = false
+                styleStage = ""
             }
         }
     }
 
     private fun describe(look: Look): String {
         val names = look.itemIds.mapNotNull { id -> items.firstOrNull { it.id == id }?.name }
-        return "${look.title} (${names.joinToString(" + ")}) for $occasion"
+        return "${look.title} (${names.joinToString(" + ")}) for ${look.occasion.ifBlank { occasion }}"
     }
 
     /** 👍 / 👎 feedback that shapes future suggestions. */
@@ -283,6 +337,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun wear(look: Look) {
         val now = System.currentTimeMillis()
+        if (now - (lastWorn[look.key] ?: 0L) < 60_000L) { message = "Already logged"; return }
+        lastWorn[look.key] = now
         history.add(0, WearLog(look.title, look.itemIds, now))
         while (history.size > 30) history.removeAt(history.lastIndex)
         look.itemIds.forEach { id ->

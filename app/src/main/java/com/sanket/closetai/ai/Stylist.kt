@@ -6,6 +6,7 @@ import com.sanket.closetai.data.Gaps
 import com.sanket.closetai.data.Item
 import com.sanket.closetai.data.Look
 import com.sanket.closetai.data.Profile
+import com.sanket.closetai.data.groupOf
 import com.sanket.closetai.data.str
 import com.sanket.closetai.data.strings
 import org.json.JSONArray
@@ -67,7 +68,9 @@ Category rules: a collared knit short-sleeve with a placket is "Polo"; a woven b
                     name = o.str("name").ifBlank { cat }.take(80),
                     color = o.str("color"),
                     colorHex = hex,
-                    secondaryColor = o.str("secondaryColor"),
+                    secondaryColor = o.str("secondaryColor").takeUnless {
+                        it.trim().lowercase() in setOf("none", "null", "n/a", "na", "-", "no")
+                    } ?: "",
                     pattern = o.str("pattern"),
                     material = o.str("material"),
                     fit = o.str("fit"),
@@ -126,7 +129,8 @@ Reply with ONLY JSON:
     private val rulebook = """
 STYLING RULEBOOK (apply like a top menswear/womenswear stylist)
 Colour
-- Build every outfit on at least one neutral (navy, charcoal, grey, white, off-white, beige, khaki, olive, brown, black). Max 3 colours total incl. shoes; accessories echo one of them.
+- Build every outfit on at least one neutral (navy, charcoal, grey, white, off-white, beige, khaki, olive, brown, black). Max 2 NON-neutral colours per outfit; neutrals are unlimited but neutrals in one look must differ in depth (light / mid / dark). Accessories echo a colour already in the look.
+- Top and bottom must clearly differ in lightness (light-over-dark or dark-over-light) unless the look is intentionally tonal with visible texture contrast.
 - Use proven pairings: navy+white/grey/khaki/brown; olive+white/navy/beige/tan; grey+black/white/burgundy/navy; beige/khaki+navy/white/olive/brown; earth tones together for warm undertones; jewel tones (bottle green, maroon, navy) with neutrals.
 - Tonal / monochrome looks are allowed only with clear shade or texture variation.
 - Avoid: two competing saturated colours, a top and bottom of nearly the same non-neutral shade, black with dark navy/brown when they read as a mismatch, brown shoes with black trousers in formal settings.
@@ -195,6 +199,20 @@ Structure
             (anchor?.let { "Every outfit MUST include item ${it.id} (${it.name}). " } ?: "") +
             "Extra wishes: ${extra.ifBlank { "none" }}. Today: $today."
 
+        // Drop clearly out-of-season pieces (anchor always kept); fall back to all items if too few remain.
+        val cold = weather.startsWith("Cold") || weather.startsWith("Very cold")
+        val hot = weather.startsWith("Hot")
+        val inSeason = items.filter { i ->
+            val s = i.seasons.map { it.lowercase() }
+            i.id == anchor?.id || when {
+                cold -> !(s.isNotEmpty() && s.all { it == "summer" })
+                hot -> !(s.isNotEmpty() && s.all { it == "winter" })
+                else -> true
+            }
+        }
+        val pool = if (inSeason.count { groupOf(it.category) == "Bottoms" } >= 1 &&
+            inSeason.count { groupOf(it.category) in setOf("Tops", "Layers", "One-piece") } >= 1) inSeason else items
+
         onStage("Shortlisting combinations…")
         val prompt1 = """
 You are an elite personal stylist building outfits ONLY from the client's own wardrobe.
@@ -205,11 +223,11 @@ ${tasteText(taste)}
 REQUEST
 $request
 WARDROBE (id | category | name | details | last worn)
-${catalog(items)}
+${catalog(pool)}
 $rulebook
 TASK
-Think through the colour, formality, weather and proportion rules, then propose 6 strong, DIFFERENT candidate outfits. Use only ids from the list. Avoid items worn in the last 3 days unless essential.
-Reply with ONLY JSON: {"outfits":[{"title":"3-5 word name","itemIds":["id",...],"why":"why it works for this client","tips":["3-4 concrete tips: tuck, sleeves, buttons, hem/cuff, accessories, grooming"],"addOn":string|null}]}
+Reason silently about the colour, formality, weather and proportion rules; output ONLY the JSON. Propose 6 strong, DIFFERENT candidate outfits (vary the main top AND the bottom across them; 2 per direction "safe", "elevated", "personality"). Use only ids from the list. Avoid items worn in the last 3 days unless essential.
+Reply with ONLY JSON: {"outfits":[{"title":"3-5 word name","direction":"safe|elevated|personality","itemIds":["id",...],"why":"why it works for this client","tips":["3-4 concrete tips: tuck, sleeves, buttons, hem/cuff, accessories, grooming"],"addOn":string|null}]}
 """.trimIndent()
         val candidates = parseLooks(ai.askJson(prompt1), ids)
         if (candidates.isEmpty()) return emptyList()
@@ -248,24 +266,71 @@ $labels
 CANDIDATE OUTFITS
 $candText
 FULL WARDROBE (you may swap in any of these ids to fix a problem)
-${catalog(items)}
+${catalog(pool)}
 $rulebook
 TASK
 1. Look at the real colours, shades, textures and fits in the photos (labels from the catalogue can be wrong).
-2. For each candidate, fix anything weak: a clashing shade, mismatched formality, bad shoe choice, wrong fabric for the weather, unflattering proportions for this client. Swap items if needed.
+2. For each candidate, fix anything weak: a clashing shade, mismatched formality, bad shoe choice, wrong fabric for the weather, unflattering proportions for this client. Swap items if needed — but do NOT swap in items worn in the last 3 days unless essential, and keep a required anchor item.
 3. Score each (fixed) outfit 1-10 on: colour harmony, suits the client's colouring & build, occasion/weather fit, overall style. Be strict — 8+ only for looks a stylist would be proud of.
-4. Return the best 3 distinct outfits, highest score first (one safe & sharp, one elevated, one with personality where possible).
-Reply with ONLY JSON: {"outfits":[{"title":"3-5 word name","itemIds":["id",...],"score":8.5,"why":"1-2 sentences naming the colour/proportion logic that makes it work on THIS client","tips":["3-4 concrete tips"],"addOn":"one specific piece that would elevate it, or null"}]}
+4. Return your best 5 distinct outfits (different main pieces), each tagged with its direction (safe = sharp & reliable, elevated = a level up, personality = more expressive but still appropriate). Reason silently; output ONLY the JSON.
+Reply with ONLY JSON: {"outfits":[{"title":"3-5 word name","direction":"safe|elevated|personality","itemIds":["id",...],"score":8.5,"why":"1-2 sentences naming the colour/proportion logic that makes it work on THIS client","tips":["3-4 concrete tips"],"addOn":"one specific piece that would elevate it, or null"}]}
 """.trimIndent()
-        return try {
-            val reviewed = parseLooks(ai.askJson(prompt2, images), ids)
-                .sortedByDescending { it.score }
-                .distinctBy { it.key }
-                .take(3)
-            reviewed.ifEmpty { candidates.take(3) }
+        val reviewed = try {
+            parseLooks(ai.askJson(prompt2, images), ids)
         } catch (e: Exception) {
-            candidates.take(3)
+            emptyList()
         }
+        return pickFinal(reviewed, candidates, items, anchor).map { it.copy(occasion = occasion) }
+    }
+
+    // ---------- deterministic quality gate ----------
+
+    private fun isValid(l: Look, byId: Map<String, Item>, ownsShoes: Boolean, anchor: Item?): Boolean {
+        val pieces = l.itemIds.mapNotNull { byId[it] }
+        if (pieces.size < 2) return false
+        val groups = pieces.map { groupOf(it.category) }
+        val onePiece = "One-piece" in groups
+        val hasTop = groups.any { it == "Tops" || it == "Layers" }
+        val hasBottom = "Bottoms" in groups
+        if (!(onePiece || (hasTop && hasBottom))) return false
+        if (ownsShoes && "Footwear" !in groups) return false
+        if (groups.count { it == "Bottoms" } > 1 || groups.count { it == "Footwear" } > 1) return false
+        if (anchor != null && anchor.id !in l.itemIds) return false
+        val f = pieces.filter { groupOf(it.category) != "Accessories" }.map { it.formality }
+        if (f.isNotEmpty() && f.max() - f.min() > 2) return false
+        return true
+    }
+
+    /** Core pieces = everything except shoes and accessories (used for diversity). */
+    private fun core(l: Look, byId: Map<String, Item>): Set<String> =
+        l.itemIds.filter { id -> byId[id]?.let { groupOf(it.category) !in setOf("Footwear", "Accessories") } ?: false }.toSet()
+
+    /**
+     * Picks 3 valid, genuinely different looks: best score first, one per direction where possible,
+     * sharing at most 1 core piece with any already-picked look; backfills from pass-1 candidates.
+     */
+    private fun pickFinal(reviewed: List<Look>, candidates: List<Look>, items: List<Item>, anchor: Item?): List<Look> {
+        val byId = items.associateBy { it.id }
+        val ownsShoes = items.any { groupOf(it.category) == "Footwear" }
+        val pool = (reviewed.sortedByDescending { it.score } + candidates)
+            .filter { isValid(it, byId, ownsShoes, anchor) }
+            .distinctBy { it.key }
+        val picked = mutableListOf<Look>()
+        fun distinctEnough(l: Look): Boolean {
+            val c = core(l, byId)
+            val limit = if (anchor != null) 2 else 1 // the anchor is shared by design
+            return picked.all { (core(it, byId) intersect c).size <= limit }
+        }
+        // 1) best look for each direction
+        for (dir in listOf("safe", "elevated", "personality")) {
+            pool.firstOrNull { it.direction == dir && it !in picked && distinctEnough(it) }?.let { picked.add(it) }
+        }
+        // 2) fill with best remaining distinct looks
+        for (l in pool) { if (picked.size >= 3) break; if (l !in picked && distinctEnough(l)) picked.add(l) }
+        // 3) still short (tiny wardrobe): allow overlap rather than return nothing
+        for (l in pool) { if (picked.size >= 3) break; if (l !in picked) picked.add(l) }
+        val order = listOf("safe", "elevated", "personality")
+        return picked.take(3).sortedBy { order.indexOf(it.direction).let { i -> if (i < 0) 9 else i } }
     }
 
     /** Virtual try-on: image 1 = the person, following images = the outfit's items. */

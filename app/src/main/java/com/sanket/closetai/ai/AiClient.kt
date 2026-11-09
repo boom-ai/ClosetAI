@@ -3,6 +3,7 @@ package com.sanket.closetai.ai
 import android.content.SharedPreferences
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -40,7 +41,8 @@ class AiClient(private val prefs: SharedPreferences) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(90, TimeUnit.SECONDS)
-        .readTimeout(180, TimeUnit.SECONDS)
+        .readTimeout(140, TimeUnit.SECONDS)
+        .callTimeout(150, TimeUnit.SECONDS)
         .build()
 
     private val jsonType = "application/json".toMediaType()
@@ -100,7 +102,7 @@ class AiClient(private val prefs: SharedPreferences) {
             .header("x-goog-api-key", s.tryOnKey)
             .post(body.toString().toRequestBody(jsonType))
             .build()
-        val o = execute(req)
+        val o = execute(req, retryTimeouts = false) // never re-send an image job that may already be billed
         val cand = o.optJSONArray("candidates")?.optJSONObject(0)
             ?: throw AiException("Gemini didn't return an image — try again.")
         val outParts = cand.optJSONObject("content")?.optJSONArray("parts") ?: JSONArray()
@@ -121,7 +123,7 @@ class AiClient(private val prefs: SharedPreferences) {
 
     private fun b64(bytes: ByteArray) = Base64.encodeToString(bytes, Base64.NO_WRAP)
 
-    private fun gemini(s: AiSettings, prompt: String, images: List<ByteArray>): String {
+    private suspend fun gemini(s: AiSettings, prompt: String, images: List<ByteArray>): String {
         val parts = JSONArray().put(JSONObject().put("text", prompt))
         images.forEach {
             parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", b64(it))))
@@ -148,7 +150,7 @@ class AiClient(private val prefs: SharedPreferences) {
         return sb.toString().ifBlank { throw AiException("Gemini returned an empty answer.") }
     }
 
-    private fun claude(s: AiSettings, prompt: String, images: List<ByteArray>): String {
+    private suspend fun claude(s: AiSettings, prompt: String, images: List<ByteArray>): String {
         val content = JSONArray()
         images.forEach {
             content.put(
@@ -161,7 +163,7 @@ class AiClient(private val prefs: SharedPreferences) {
         content.put(JSONObject().put("type", "text").put("text", prompt))
         val body = JSONObject()
             .put("model", s.model)
-            .put("max_tokens", 4096)
+            .put("max_tokens", 8192)
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
         val req = Request.Builder()
             .url("https://api.anthropic.com/v1/messages")
@@ -179,25 +181,42 @@ class AiClient(private val prefs: SharedPreferences) {
         return sb.toString().ifBlank { throw AiException("Claude returned an empty answer.") }
     }
 
-    /** Sends the request, retrying up to 4 times when the AI is overloaded (429/500/502/503/504/529). */
-    private fun execute(req: Request): JSONObject {
-        val waits = longArrayOf(3_000, 8_000, 15_000, 25_000)
-        var attempt = 0
+    /** Optional progress callback (runs on the main thread) — e.g. "AI busy, retrying (1/3)…". */
+    var onRetry: ((String) -> Unit)? = null
+
+    private suspend fun notifyRetry(msg: String) {
+        val cb = onRetry ?: return
+        withContext(Dispatchers.Main) { cb(msg) }
+    }
+
+    /**
+     * Sends the request. Retries (cancellably) up to 3 times when the AI is overloaded
+     * (429/500/502/503/504/529) and up to 2 times on dropped connections.
+     */
+    private suspend fun execute(req: Request, retryTimeouts: Boolean = true): JSONObject {
+        val waits = longArrayOf(2_000, 5_000, 10_000)
+        var busyTries = 0
+        var netTries = 0
         while (true) {
             val (code, text) = try {
                 http.newCall(req).execute().use { resp -> resp.code to resp.body?.string().orEmpty() }
             } catch (e: java.io.InterruptedIOException) {
-                if (attempt < 2) { Thread.sleep(3_000); attempt++; continue }
+                if (retryTimeouts && netTries < 2) {
+                    netTries++; notifyRetry("Slow connection, retrying ($netTries/2)…"); delay(3_000); continue
+                }
                 throw AiException("The AI took too long to answer — check your internet and try again.")
             } catch (e: java.io.IOException) {
-                if (attempt < 2) { Thread.sleep(3_000); attempt++; continue }
+                if (netTries < 2) {
+                    netTries++; notifyRetry("Connection dropped, retrying ($netTries/2)…"); delay(3_000); continue
+                }
                 throw AiException("No internet connection — check mobile data/Wi-Fi (and turn off Private DNS or VPN ad-blockers), then try again.")
             }
             if (code in 200..299) return JSONObject(text)
             val retryable = code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529
-            if (retryable && attempt < waits.size) {
-                Thread.sleep(waits[attempt])
-                attempt++
+            if (retryable && busyTries < waits.size) {
+                notifyRetry("AI busy, retrying (${busyTries + 1}/${waits.size})…")
+                delay(waits[busyTries])
+                busyTries++
                 continue
             }
             val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull()
@@ -206,8 +225,8 @@ class AiClient(private val prefs: SharedPreferences) {
                     400 -> "AI request rejected: ${msg ?: "check the model name in Settings"}"
                     401, 403 -> "Your API key was rejected — check it in Settings."
                     404 -> "Model not found — check the model name in Settings."
-                    429 -> "AI rate limit hit — wait a minute and try again."
-                    500, 502, 503, 504, 529 -> "The AI servers are busy right now. Wait a minute and try again, or switch model/provider in Settings."
+                    429 -> "AI rate limit / quota reached — wait a minute, or check your plan in AI Studio."
+                    500, 502, 503, 504, 529 -> "The AI servers are busy right now. Try again in a minute, or switch model/provider in Settings."
                     else -> "AI error $code: ${msg ?: "try again"}"
                 },
             )

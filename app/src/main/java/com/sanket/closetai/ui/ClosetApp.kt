@@ -75,6 +75,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -490,11 +492,24 @@ private fun StyleScreen(vm: AppViewModel, pad: PaddingValues) {
                 Text("  ${vm.styleStage.ifBlank { "Putting looks together…" }}  (30–90 s)", color = Mute)
             }
         }
-        items(vm.looks) { LookCard(vm, it) }
+        vm.styleError?.let { err ->
+            item {
+                Column(Modifier.fillMaxWidth().clip(R18).background(Color(0xFF2E1A17)).border(1.dp, Bad, R18).padding(16.dp)) {
+                    Text("Couldn't style that", color = Ink, fontWeight = FontWeight.Bold)
+                    Text(err, color = Color(0xFFF2B3A8), fontSize = 13.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
+                    Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { vm.styleMe() }, shape = R14,
+                            colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Bg)) { Text("Try again", fontWeight = FontWeight.SemiBold) }
+                        OutlinedButton(onClick = { vm.showSettings = true }, shape = R14, border = BorderStroke(1.dp, Line)) { Text("Settings", color = Ink) }
+                    }
+                }
+            }
+        }
+        items(vm.looks, key = { "look-" + it.key }) { LookCard(vm, it) }
 
         item { SectionHeader("Saved looks", if (vm.saved.isEmpty()) "" else "${vm.saved.size}") }
         if (vm.saved.isEmpty()) item { Text("Tap ♡ on any outfit to keep it here.", color = Mute, fontSize = 13.sp) }
-        items(vm.saved.toList()) { LookCard(vm, it) }
+        items(vm.saved.toList(), key = { "saved-" + it.key }) { LookCard(vm, it) }
 
         item { SectionHeader("Recently worn", "") }
         item {
@@ -578,7 +593,13 @@ private fun LookCard(vm: AppViewModel, look: Look) {
         }
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(look.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Column(Modifier.weight(1f)) {
+                    if (look.direction.isNotBlank()) Text(
+                        when (look.direction) { "safe" -> "SAFE & SHARP"; "elevated" -> "ELEVATED"; "personality" -> "PERSONALITY"; else -> look.direction.uppercase() },
+                        color = Gold, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp,
+                    )
+                    Text(look.title, style = MaterialTheme.typography.titleMedium)
+                }
                 if (look.score > 0) {
                     Text(
                         String.format(java.util.Locale.US, "%.1f/10", look.score),
@@ -627,7 +648,13 @@ private fun ProfileScreen(vm: AppViewModel, pad: PaddingValues, onGallery: () ->
     var height by remember(p.height) { mutableStateOf(p.height) }
     var city by remember(p.city) { mutableStateOf(p.city) }
     var notes by remember(p.notes) { mutableStateOf(p.notes) }
-    fun commit() = vm.updateProfile(vm.profile.copy(height = height.trim(), city = city.trim(), notes = notes.trim()))
+    fun commit() {
+        val cur = vm.profile
+        if (cur.height != height.trim() || cur.city != city.trim() || cur.notes != notes.trim())
+            vm.updateProfile(cur.copy(height = height.trim(), city = city.trim(), notes = notes.trim()))
+    }
+    val latestCommit by rememberUpdatedState({ commit() })
+    DisposableEffect(Unit) { onDispose { latestCommit() } }
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState())

@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ImageDecoder
 import android.net.Uri
+import android.util.AtomicFile
 import androidx.core.content.FileProvider
 import org.json.JSONArray
 import org.json.JSONObject
@@ -15,6 +16,7 @@ import java.io.FileOutputStream
 /** Stores everything locally on the phone: one JSON file + JPEGs in app storage. */
 class Repo(private val ctx: Context) {
     private val dataFile = File(ctx.filesDir, "closet.json")
+    private val atomic = AtomicFile(dataFile)
     private val imgDir = File(ctx.filesDir, "images").apply { mkdirs() }
     private val captureDir = File(ctx.filesDir, "captures").apply { mkdirs() }
 
@@ -28,10 +30,22 @@ class Repo(private val ctx: Context) {
         val disliked: List<String> = emptyList(),
     )
 
-    fun load(): Snapshot {
-        if (!dataFile.exists()) return Snapshot(emptyList(), Profile(), emptyList(), emptyList())
+    /**
+     * Returns the saved data, an empty snapshot on first run, or null if the file exists but
+     * can't be read (it is then copied to closet.json.bad-<time> and saving stays disabled,
+     * so a bad read can never overwrite the real wardrobe).
+     */
+    fun load(): Snapshot? {
+        val text = try {
+            String(atomic.readFully(), Charsets.UTF_8)
+        } catch (e: java.io.FileNotFoundException) {
+            return Snapshot(emptyList(), Profile(), emptyList(), emptyList())
+        } catch (e: Exception) {
+            backupBad(); return null
+        }
+        if (text.isBlank()) { backupBad(); return null }
         return try {
-            val o = JSONObject(dataFile.readText())
+            val o = JSONObject(text)
             fun <T> list(key: String, f: (JSONObject) -> T): List<T> {
                 val a = o.optJSONArray(key) ?: return emptyList()
                 return (0 until a.length()).mapNotNull { a.optJSONObject(it)?.let(f) }
@@ -48,8 +62,12 @@ class Repo(private val ctx: Context) {
                 disliked = o.optJSONArray("disliked").strings(),
             )
         } catch (e: Exception) {
-            Snapshot(emptyList(), Profile(), emptyList(), emptyList())
+            backupBad(); null
         }
+    }
+
+    private fun backupBad() {
+        runCatching { dataFile.copyTo(File(ctx.filesDir, "closet.json.bad-${System.currentTimeMillis()}"), overwrite = true) }
     }
 
     @Synchronized
@@ -62,10 +80,14 @@ class Repo(private val ctx: Context) {
             .put("tryOns", JSONObject().apply { s.tryOns.forEach { (k, v) -> put(k, v) } })
             .put("liked", JSONArray(s.liked))
             .put("disliked", JSONArray(s.disliked))
-        val tmp = File(ctx.filesDir, "closet.json.tmp")
-        tmp.writeText(o.toString())
-        if (!tmp.renameTo(dataFile)) {
-            dataFile.writeText(o.toString()); tmp.delete()
+        val bytes = o.toString().toByteArray(Charsets.UTF_8)
+        val out = atomic.startWrite()
+        try {
+            out.write(bytes)
+            atomic.finishWrite(out)   // fsyncs, then atomically replaces closet.json
+        } catch (e: Exception) {
+            atomic.failWrite(out)
+            throw e
         }
     }
 
@@ -75,8 +97,10 @@ class Repo(private val ctx: Context) {
         return FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f)
     }
 
+    /** Deletes camera temp files older than 10 minutes (never one still in use). */
     fun clearCaptures() {
-        captureDir.listFiles()?.forEach { it.delete() }
+        val cutoff = System.currentTimeMillis() - 10 * 60_000L
+        captureDir.listFiles()?.forEach { if (it.lastModified() < cutoff) it.delete() }
     }
 
     /** Decode (with EXIF rotation), downscale, flatten onto white and save as JPEG. */
