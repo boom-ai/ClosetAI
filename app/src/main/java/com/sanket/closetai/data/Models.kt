@@ -130,16 +130,19 @@ data class Look(
     val why: String,
     val tips: List<String>,
     val addOn: String,
+    val score: Double = 0.0,
 ) {
     val key: String get() = itemIds.sorted().joinToString(",")
 
     fun toJson(): JSONObject = JSONObject().put("title", title).put("itemIds", JSONArray(itemIds))
-        .put("why", why).put("tips", JSONArray(tips)).put("addOn", addOn)
+        .put("why", why).put("tips", JSONArray(tips)).put("addOn", addOn).put("score", score)
 
     companion object {
         fun from(o: JSONObject) = Look(
             title = o.str("title").ifBlank { "Outfit" }, itemIds = o.optJSONArray("itemIds").strings(),
-            why = o.str("why"), tips = o.optJSONArray("tips").strings(), addOn = o.str("addOn"),
+            why = o.str("why"), tips = o.optJSONArray("tips").strings(),
+            addOn = o.str("addOn").let { if (it == "null") "" else it },
+            score = o.optDouble("score", 0.0).let { if (it.isNaN()) 0.0 else it },
         )
     }
 }

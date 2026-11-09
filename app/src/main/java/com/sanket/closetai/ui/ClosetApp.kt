@@ -487,7 +487,7 @@ private fun StyleScreen(vm: AppViewModel, pad: PaddingValues) {
         if (vm.styling) item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
                 CircularProgressIndicator(Modifier.size(20.dp), color = Gold, strokeWidth = 2.dp)
-                Text("  Putting looks together from your closet…", color = Mute)
+                Text("  ${vm.styleStage.ifBlank { "Putting looks together…" }}  (30–90 s)", color = Mute)
             }
         }
         items(vm.looks) { LookCard(vm, it) }
@@ -577,7 +577,16 @@ private fun LookCard(vm: AppViewModel, look: Look) {
             }
         }
         Column(Modifier.padding(16.dp)) {
-            Text(look.title, style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(look.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                if (look.score > 0) {
+                    Text(
+                        String.format(java.util.Locale.US, "%.1f/10", look.score),
+                        color = Bg, fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                        modifier = Modifier.clip(RoundedCornerShape(50)).background(Gold).padding(horizontal = 9.dp, vertical = 3.dp),
+                    )
+                }
+            }
             Text(look.why, color = Color(0xFFE2D8CC), lineHeight = 20.sp, modifier = Modifier.padding(top = 6.dp))
             look.tips.forEach { Text("•  $it", color = Color(0xFFE2D8CC), fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.padding(top = 4.dp)) }
             if (look.addOn.isNotBlank()) Text("🛍️ Would level up with: ${look.addOn}", color = Mute, fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
@@ -592,12 +601,18 @@ private fun LookCard(vm: AppViewModel, look: Look) {
             Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = { vm.wear(look) }, shape = R14,
                     colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Bg)) {
-                    Text("👕 Wearing this", fontWeight = FontWeight.SemiBold)
+                    Text("👕 Wear", fontWeight = FontWeight.SemiBold)
                 }
-                OutlinedButton(onClick = { vm.toggleSave(look) }, shape = R14, border = BorderStroke(1.dp, Line)) {
+                val r = vm.ratings[look.key]
+                OutlinedButton(onClick = { vm.rate(look, true) }, shape = R14, border = BorderStroke(1.dp, if (r == 1) Gold else Line),
+                    contentPadding = PaddingValues(horizontal = 12.dp)) { Text("👍") }
+                OutlinedButton(onClick = { vm.rate(look, false) }, shape = R14, border = BorderStroke(1.dp, if (r == -1) Bad else Line),
+                    contentPadding = PaddingValues(horizontal = 12.dp)) { Text("👎") }
+                OutlinedButton(onClick = { vm.toggleSave(look) }, shape = R14, border = BorderStroke(1.dp, Line),
+                    contentPadding = PaddingValues(horizontal = 12.dp)) {
                     Icon(if (saved) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, null, tint = if (saved) Copper else Ink,
                         modifier = Modifier.size(18.dp))
-                    Text(if (saved) "  Saved" else "  Save", color = Ink)
+                    Text(if (saved) " Saved" else " Save", color = Ink)
                 }
             }
         }

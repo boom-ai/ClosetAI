@@ -24,6 +24,8 @@ class Repo(private val ctx: Context) {
         val saved: List<Look>,
         val history: List<WearLog>,
         val tryOns: Map<String, String> = emptyMap(),
+        val liked: List<String> = emptyList(),
+        val disliked: List<String> = emptyList(),
     )
 
     fun load(): Snapshot {
@@ -42,6 +44,8 @@ class Repo(private val ctx: Context) {
                 tryOns = o.optJSONObject("tryOns")?.let { t ->
                     t.keys().asSequence().associateWith { k -> t.optString(k) }.filterValues { File(it).exists() }
                 } ?: emptyMap(),
+                liked = o.optJSONArray("liked").strings(),
+                disliked = o.optJSONArray("disliked").strings(),
             )
         } catch (e: Exception) {
             Snapshot(emptyList(), Profile(), emptyList(), emptyList())
@@ -56,6 +60,8 @@ class Repo(private val ctx: Context) {
             .put("saved", JSONArray().apply { s.saved.forEach { put(it.toJson()) } })
             .put("history", JSONArray().apply { s.history.forEach { put(it.toJson()) } })
             .put("tryOns", JSONObject().apply { s.tryOns.forEach { (k, v) -> put(k, v) } })
+            .put("liked", JSONArray(s.liked))
+            .put("disliked", JSONArray(s.disliked))
         val tmp = File(ctx.filesDir, "closet.json.tmp")
         tmp.writeText(o.toString())
         if (!tmp.renameTo(dataFile)) {

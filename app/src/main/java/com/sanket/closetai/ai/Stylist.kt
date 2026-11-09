@@ -10,6 +10,11 @@ import com.sanket.closetai.data.str
 import com.sanket.closetai.data.strings
 import org.json.JSONArray
 import org.json.JSONObject
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -115,38 +120,151 @@ Reply with ONLY JSON:
         return sb.toString()
     }
 
-    suspend fun outfits(
-        items: List<Item>, profile: Profile, occasion: String, weather: String, vibe: String,
-        anchor: Item?, extra: String,
-    ): List<Look> {
-        val today = SimpleDateFormat("EEEE d MMMM yyyy", Locale.ENGLISH).format(Date())
-        val prompt = """
-You are an expert personal stylist building outfits ONLY from the client's own wardrobe below.
-CLIENT
-${profileText(profile)}
-REQUEST
-Occasion: $occasion. Weather: $weather. Vibe: $vibe. ${anchor?.let { "Every outfit MUST include item ${it.id} (${it.name})." } ?: ""} Extra: ${extra.ifBlank { "none" }}.
-Today: $today.
-WARDROBE (id | category | name | details | last worn)
-${catalog(items)}
-RULES
-- Give 3 distinct outfits. Use only ids from the list. Each: a top (or one-piece), a bottom, and footwear if any is owned; add a layer/accessories when they genuinely help.
-- Match formality to the occasion and fabrics to the weather. Prefer the client's best colours and fits. Avoid items worn in the last 3 days unless needed. Don't use the same main piece in all 3.
-- Tips must be concrete: tuck or not, sleeve roll, buttons, cuff/hem, how to wear accessories, a grooming touch.
-- If a piece is genuinely missing for this occasion, name it in addOn (one short item), else null.
-Reply with ONLY JSON: {"outfits":[{"title":"3-5 word name","itemIds":["id",...],"why":"1-2 sentences on why it works for them","tips":["3-4 short tips"],"addOn":string|null}]}
+    /** Taste memory from the client's 👍 / 👎 on past looks. */
+    data class Taste(val liked: List<String>, val disliked: List<String>)
+
+    private val rulebook = """
+STYLING RULEBOOK (apply like a top menswear/womenswear stylist)
+Colour
+- Build every outfit on at least one neutral (navy, charcoal, grey, white, off-white, beige, khaki, olive, brown, black). Max 3 colours total incl. shoes; accessories echo one of them.
+- Use proven pairings: navy+white/grey/khaki/brown; olive+white/navy/beige/tan; grey+black/white/burgundy/navy; beige/khaki+navy/white/olive/brown; earth tones together for warm undertones; jewel tones (bottle green, maroon, navy) with neutrals.
+- Tonal / monochrome looks are allowed only with clear shade or texture variation.
+- Avoid: two competing saturated colours, a top and bottom of nearly the same non-neutral shade, black with dark navy/brown when they read as a mismatch, brown shoes with black trousers in formal settings.
+- Favour the client's best colours near the face (the top layer); colours they should avoid go to the bottom half or not at all.
+Contrast & proportion
+- Match outfit contrast to the client's own colouring (darker hair/beard + medium skin → medium-high contrast works).
+- Lean/slim builds: add structure and visual width up top (polos, oxford/overshirts, layers, crew sweaters); avoid baggy, sloppy oversize and very skinny together.
+- Shorter or average height (under ~5'9"): keep one continuous colour from trouser to shoe or tonal bottom half, minimise horizontal breaks below the waist, avoid long untucked hems past the mid-fly, prefer slim-straight or tapered trousers without heavy stacking.
+Formality, pattern, fabric
+- All pieces within ±1 formality level of each other and of the occasion. Never: cargo/joggers with blazer or formal shoes; formal shoes with shorts; gym wear outside gym/very casual.
+- Max one bold pattern or graphic per outfit; pair stripes/checks with solids; logos small.
+- Weather: hot → light colours, cotton/linen, short sleeves, no heavy layers; rainy → dark quick-dry bottoms, no suede; cold → layer (base + mid + outer), heavier textures, closed shoes.
+- Belt matches shoe colour family; sneakers clean and minimal for smart casual; ethnic: kurta with slim jeans/chinos/churidar + juttis/loafers/clean sneakers.
+Structure
+- Each outfit: a top (or one-piece) + a bottom + footwear if any is owned; add a layer/accessory only when it improves the look or the weather needs it.
+- The 3 final looks should take different directions: one safe & sharp, one elevated, one with personality — all appropriate.
 """.trimIndent()
-        val v = ai.askJson(prompt)
+
+    private fun tasteText(t: Taste): String {
+        if (t.liked.isEmpty() && t.disliked.isEmpty()) return "No feedback yet."
+        return "Looks the client LIKED: ${t.liked.takeLast(12).joinToString("; ").ifBlank { "none" }}.\n" +
+            "Looks the client DISLIKED (avoid similar): ${t.disliked.takeLast(12).joinToString("; ").ifBlank { "none" }}."
+    }
+
+    private fun parseLooks(v: Any, ids: Set<String>): List<Look> {
         val arr = when (v) {
             is JSONObject -> v.optJSONArray("outfits") ?: JSONArray()
             is JSONArray -> v
             else -> JSONArray()
         }
-        val ids = items.map { it.id }.toSet()
         return (0 until arr.length()).mapNotNull { i ->
             arr.optJSONObject(i)?.let { Look.from(it) }
                 ?.let { l -> l.copy(itemIds = l.itemIds.filter { it in ids }.distinct(), tips = l.tips.take(5)) }
-                ?.takeIf { it.itemIds.isNotEmpty() }
+                ?.takeIf { it.itemIds.size >= 2 }
+        }
+    }
+
+    /** Small JPEG of an image file for visual review (keeps requests light). */
+    private fun smallJpeg(bytes: ByteArray, maxPx: Int): ByteArray? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxPx) sample *= 2
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        bmp.recycle()
+        out.toByteArray()
+    } catch (e: Exception) { null }
+
+    /**
+     * Two-pass styling:
+     *  1) shortlist 6 candidate outfits from the text catalogue using the rulebook;
+     *  2) a visual review that looks at the actual garment photos (and the client photo),
+     *     fixes clashes, scores each look and returns the best 3.
+     */
+    suspend fun outfits(
+        items: List<Item>, profile: Profile, occasion: String, weather: String, vibe: String,
+        anchor: Item?, extra: String, taste: Taste,
+        readImage: (String) -> ByteArray?,
+        onStage: (String) -> Unit = {},
+    ): List<Look> {
+        val today = SimpleDateFormat("EEEE d MMMM yyyy", Locale.ENGLISH).format(Date())
+        val ids = items.map { it.id }.toSet()
+        val request = "Occasion: $occasion. Weather: $weather. Vibe: $vibe. " +
+            (anchor?.let { "Every outfit MUST include item ${it.id} (${it.name}). " } ?: "") +
+            "Extra wishes: ${extra.ifBlank { "none" }}. Today: $today."
+
+        onStage("Shortlisting combinations…")
+        val prompt1 = """
+You are an elite personal stylist building outfits ONLY from the client's own wardrobe.
+CLIENT
+${profileText(profile)}
+TASTE
+${tasteText(taste)}
+REQUEST
+$request
+WARDROBE (id | category | name | details | last worn)
+${catalog(items)}
+$rulebook
+TASK
+Think through the colour, formality, weather and proportion rules, then propose 6 strong, DIFFERENT candidate outfits. Use only ids from the list. Avoid items worn in the last 3 days unless essential.
+Reply with ONLY JSON: {"outfits":[{"title":"3-5 word name","itemIds":["id",...],"why":"why it works for this client","tips":["3-4 concrete tips: tuck, sleeves, buttons, hem/cuff, accessories, grooming"],"addOn":string|null}]}
+""".trimIndent()
+        val candidates = parseLooks(ai.askJson(prompt1), ids)
+        if (candidates.isEmpty()) return emptyList()
+
+        // ---- pass 2: visual review ----
+        onStage("Checking colours & fit visually…")
+        val used = candidates.flatMap { it.itemIds }.distinct().take(16)
+        val byId = items.associateBy { it.id }
+        val images = mutableListOf<ByteArray>()
+        val labels = StringBuilder()
+        withContext(Dispatchers.Default) {
+        profile.photoPath.takeIf { it.isNotBlank() }?.let { readImage(it) }?.let { smallJpeg(it, 640) }?.let {
+            images.add(it); labels.append("Image 1: the client.\n")
+        }
+        used.forEach { id ->
+            val item = byId[id] ?: return@forEach
+            readImage(item.imagePath)?.let { smallJpeg(it, 384) }?.let {
+                images.add(it)
+                labels.append("Image ${images.size}: item $id — ${item.category}, ${item.name}\n")
+            }
+        }
+        }
+        val candText = candidates.mapIndexed { i, l ->
+            "${i + 1}. ${l.title}: " + l.itemIds.joinToString(" + ") { id -> "$id (${byId[id]?.name ?: "?"})" }
+        }.joinToString("\n")
+        val prompt2 = """
+You are reviewing outfit candidates for a client as a senior stylist. You can SEE the actual garments.
+CLIENT
+${profileText(profile)}
+TASTE
+${tasteText(taste)}
+REQUEST
+$request
+IMAGES
+$labels
+CANDIDATE OUTFITS
+$candText
+FULL WARDROBE (you may swap in any of these ids to fix a problem)
+${catalog(items)}
+$rulebook
+TASK
+1. Look at the real colours, shades, textures and fits in the photos (labels from the catalogue can be wrong).
+2. For each candidate, fix anything weak: a clashing shade, mismatched formality, bad shoe choice, wrong fabric for the weather, unflattering proportions for this client. Swap items if needed.
+3. Score each (fixed) outfit 1-10 on: colour harmony, suits the client's colouring & build, occasion/weather fit, overall style. Be strict — 8+ only for looks a stylist would be proud of.
+4. Return the best 3 distinct outfits, highest score first (one safe & sharp, one elevated, one with personality where possible).
+Reply with ONLY JSON: {"outfits":[{"title":"3-5 word name","itemIds":["id",...],"score":8.5,"why":"1-2 sentences naming the colour/proportion logic that makes it work on THIS client","tips":["3-4 concrete tips"],"addOn":"one specific piece that would elevate it, or null"}]}
+""".trimIndent()
+        return try {
+            val reviewed = parseLooks(ai.askJson(prompt2, images), ids)
+                .sortedByDescending { it.score }
+                .distinctBy { it.key }
+                .take(3)
+            reviewed.ifEmpty { candidates.take(3) }
+        } catch (e: Exception) {
+            candidates.take(3)
         }
     }
 

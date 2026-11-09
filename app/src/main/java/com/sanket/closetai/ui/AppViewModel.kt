@@ -57,6 +57,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val tryOns = mutableStateMapOf<String, String>()
     /** look keys currently generating */
     val tryOnBusy = mutableStateListOf<String>()
+    /** Taste memory: short descriptions of liked / disliked looks. */
+    val liked = mutableStateListOf<String>()
+    val disliked = mutableStateListOf<String>()
+    /** look.key -> +1 / -1 for the current session's buttons */
+    val ratings = mutableStateMapOf<String, Int>()
+    var styleStage by mutableStateOf("")
 
     var tab by mutableStateOf(Tab.WARDROBE)
     var filter by mutableStateOf("All")
@@ -87,12 +93,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             saved.addAll(s.saved)
             history.addAll(s.history)
             tryOns.putAll(s.tryOns)
+            liked.addAll(s.liked)
+            disliked.addAll(s.disliked)
             if (!ai.isConfigured) message = "Tip: add your free AI key in Settings to turn on auto-detection."
         }
     }
 
     private fun persist() {
-        val snap = Repo.Snapshot(items.toList(), profile, saved.toList(), history.toList(), tryOns.toMap())
+        val snap = Repo.Snapshot(items.toList(), profile, saved.toList(), history.toList(), tryOns.toMap(),
+            liked.toList(), disliked.toList())
         viewModelScope.launch(Dispatchers.IO) {
             saveLock.withLock { runCatching { repo.save(snap) } }
         }
@@ -228,6 +237,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val res = stylist.outfits(
                     items.toList(), profile, occasion, weather, vibe,
                     items.firstOrNull { it.id == anchorId }, extra,
+                    taste = Stylist.Taste(liked.toList(), disliked.toList()),
+                    readImage = { path -> runCatching { File(path).readBytes() }.getOrNull() },
+                    onStage = { st -> styleStage = st },
                 )
                 if (res.isEmpty()) message = "Couldn't build a full look — try another occasion or add more pieces."
                 looks.addAll(res)
@@ -237,6 +249,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 styling = false
             }
         }
+    }
+
+    private fun describe(look: Look): String {
+        val names = look.itemIds.mapNotNull { id -> items.firstOrNull { it.id == id }?.name }
+        return "${look.title} (${names.joinToString(" + ")}) for $occasion"
+    }
+
+    /** 👍 / 👎 feedback that shapes future suggestions. */
+    fun rate(look: Look, up: Boolean) {
+        val d = describe(look)
+        liked.remove(d); disliked.remove(d)
+        if (ratings[look.key] == (if (up) 1 else -1)) {
+            ratings.remove(look.key)
+        } else {
+            ratings[look.key] = if (up) 1 else -1
+            if (up) liked.add(d) else disliked.add(d)
+        }
+        while (liked.size > 30) liked.removeAt(0)
+        while (disliked.size > 30) disliked.removeAt(0)
+        persist()
+        message = if (ratings[look.key] == null) "Feedback removed" else "Got it — future looks will learn from this"
     }
 
     fun toggleSave(look: Look) {

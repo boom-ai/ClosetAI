@@ -184,7 +184,15 @@ class AiClient(private val prefs: SharedPreferences) {
         val waits = longArrayOf(3_000, 8_000, 15_000, 25_000)
         var attempt = 0
         while (true) {
-            val (code, text) = http.newCall(req).execute().use { resp -> resp.code to resp.body?.string().orEmpty() }
+            val (code, text) = try {
+                http.newCall(req).execute().use { resp -> resp.code to resp.body?.string().orEmpty() }
+            } catch (e: java.io.InterruptedIOException) {
+                if (attempt < 2) { Thread.sleep(3_000); attempt++; continue }
+                throw AiException("The AI took too long to answer — check your internet and try again.")
+            } catch (e: java.io.IOException) {
+                if (attempt < 2) { Thread.sleep(3_000); attempt++; continue }
+                throw AiException("No internet connection — check mobile data/Wi-Fi (and turn off Private DNS or VPN ad-blockers), then try again.")
+            }
             if (code in 200..299) return JSONObject(text)
             val retryable = code == 429 || code == 500 || code == 502 || code == 503 || code == 504 || code == 529
             if (retryable && attempt < waits.size) {
