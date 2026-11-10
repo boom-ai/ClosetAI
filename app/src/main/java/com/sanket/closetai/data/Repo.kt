@@ -28,6 +28,11 @@ class Repo(private val ctx: Context) {
         val tryOns: Map<String, String> = emptyMap(),
         val liked: List<String> = emptyList(),
         val disliked: List<String> = emptyList(),
+        /** occasion -> cached styled looks */
+        val today: Map<String, StyledSet> = emptyMap(),
+        /** attribute-level taste weights, e.g. "top:Polo" -> 1.5 */
+        val taste: Map<String, Double> = emptyMap(),
+        val gaps: Gaps? = null,
     )
 
     /**
@@ -36,6 +41,11 @@ class Repo(private val ctx: Context) {
      * so a bad read can never overwrite the real wardrobe).
      */
     fun load(): Snapshot? {
+        // one-time safety copy of the v1 data before v2 ever writes
+        runCatching {
+            val bak = File(ctx.filesDir, "closet.v1.bak")
+            if (dataFile.exists() && !bak.exists()) dataFile.copyTo(bak)
+        }
         val text = try {
             String(atomic.readFully(), Charsets.UTF_8)
         } catch (e: java.io.FileNotFoundException) {
@@ -60,6 +70,13 @@ class Repo(private val ctx: Context) {
                 } ?: emptyMap(),
                 liked = o.optJSONArray("liked").strings(),
                 disliked = o.optJSONArray("disliked").strings(),
+                today = o.optJSONObject("today")?.let { t ->
+                    t.keys().asSequence().mapNotNull { k -> t.optJSONObject(k)?.let { k to StyledSet.from(it) } }.toMap()
+                } ?: emptyMap(),
+                taste = o.optJSONObject("taste")?.let { t ->
+                    t.keys().asSequence().associateWith { k -> t.optDouble(k, 0.0) }.filterValues { !it.isNaN() }
+                } ?: emptyMap(),
+                gaps = o.optJSONObject("gaps")?.let { Gaps.from(it) },
             )
         } catch (e: Exception) {
             backupBad(); null
@@ -80,6 +97,9 @@ class Repo(private val ctx: Context) {
             .put("tryOns", JSONObject().apply { s.tryOns.forEach { (k, v) -> put(k, v) } })
             .put("liked", JSONArray(s.liked))
             .put("disliked", JSONArray(s.disliked))
+            .put("today", JSONObject().apply { s.today.forEach { (k, v) -> put(k, v.toJson()) } })
+            .put("taste", JSONObject().apply { s.taste.forEach { (k, v) -> put(k, v) } })
+            .apply { s.gaps?.let { put("gaps", it.toJson()) } }
         val bytes = o.toString().toByteArray(Charsets.UTF_8)
         val out = atomic.startWrite()
         try {
@@ -132,6 +152,9 @@ class Repo(private val ctx: Context) {
         f.writeBytes(bytes)
         return f
     }
+
+    /** content:// Uri for sharing a file from images/ or tryon/. */
+    fun shareUri(path: String): Uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", File(path))
 
     fun deleteFile(path: String) {
         if (path.isNotBlank()) File(path).delete()

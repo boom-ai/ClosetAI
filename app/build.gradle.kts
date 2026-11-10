@@ -12,8 +12,8 @@ android {
         applicationId = "com.sanket.closetai"
         minSdk = 28
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 100 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0)
+        versionName = "2.0"
     }
 
     signingConfigs {
