@@ -37,7 +37,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v1.0.${{ github.run_number }}" ClosetAI.apk \
-            --title "Closet AI build ${{ github.run_number }}" \
+          gh release create "v2.0.${{ github.run_number }}" ClosetAI.apk \
+            --title "Closet AI 2.0 (build ${{ github.run_number }})" \
             --notes "Download ClosetAI.apk on your Android phone and install it." \
             --latest

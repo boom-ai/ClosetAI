@@ -1,14 +1,15 @@
 # Closet AI (native Android)
 
-Kotlin + Jetpack Compose wardrobe app that:
+Your wardrobe, styled for today's weather. Kotlin + Jetpack Compose.
 
-- reads your full-length photo to work out build, proportions, skin undertone, best colours and fits
-- auto-detects each clothing photo (T-shirt, polo, shirt, kurta, jeans, chinos, sneakers, watch…) plus its colour, pattern, fabric, fit and formality
-- styles 3 outfits from **your own clothes** for any occasion, weather and vibe, with concrete styling tips
-- logs what you wear so it avoids repeats, saves favourite looks, and tells you which few pieces to buy next
+- **Today**: live weather for your location (Open-Meteo, no key) and three looks from your own clean clothes, one tap to wear
+- **Closet**: photo-logged clothes with AI detection (type, colour, fabric, warmth, formality), search, laundry status, re-detect, wardrobe gaps
+- **Looks**: saved looks and wear history
+- **Me**: full-length photo analysis, learned taste, settings
+- Styling engine: on-device scoring (temperature bands, rain/UV/humidity, occasion formality, colour harmony, rotation, taste), then one AI call that picks and polishes; still works on-device when AI is unavailable
+- Virtual try-on with Gemini's image model
 
-Everything (photos and wardrobe) is stored only on the phone. AI calls go straight from the phone to
-Google Gemini or Anthropic Claude using **your own API key** (set it in ⚙ Settings inside the app).
+Everything is stored on the phone. AI calls go straight from the phone to Gemini or Claude with **your own key**.
 
 ## Get the APK — option A: GitHub builds it for you (no PC needed)
 
